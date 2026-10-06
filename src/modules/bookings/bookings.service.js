@@ -1,52 +1,51 @@
 'use strict';
 
-const { withTransaction } = require('../../db/mysql');
+const { Op } = require('sequelize');
+const { withTransaction } = require('../../db/sequelize');
+const { User, Booking, BookingStatusHistory } = require('../../models/sql');
 const AppError = require('../../utils/AppError');
 const sm = require('./bookingStateMachine');
 
-const BOOKING_COLUMNS =
-  'id, artist_id, client_id, status, event_start, event_end, notes, cancelled_by, created_at, updated_at';
-
 /**
- * Locks the artist's user row for the rest of the transaction.
+ * Locks the artist's user row for the rest of the transaction (SELECT … FOR UPDATE).
  *
  * Every write that can create a confirmed booking for an artist takes this lock first, so two
  * concurrent requests cannot both pass the overlap check and double-book the artist.
  * Locking the artist row (rather than a gap/range lock on bookings) keeps the lock order
  * simple — artist row, then booking row — which avoids deadlocks.
  */
-async function lockArtist(conn, artistId) {
-  const [rows] = await conn.query(
-    "SELECT id FROM users WHERE id = ? AND role = 'artist' FOR UPDATE",
-    [artistId],
-  );
-  return rows.length > 0;
+async function lockArtist(artistId, t) {
+  const artist = await User.findOne({
+    where: { id: artistId, role: 'artist' },
+    attributes: ['id'],
+    lock: t.LOCK.UPDATE,
+    transaction: t,
+  });
+  return Boolean(artist);
 }
 
-/** Half-open interval overlap: [aStart, aEnd) overlaps [bStart, bEnd) iff aStart < bEnd AND aEnd > bStart. */
-async function findConfirmedOverlap(conn, { artistId, start, end, excludeBookingId = null }) {
-  const [rows] = await conn.query(
-    `SELECT id FROM bookings
-      WHERE artist_id = ?
-        AND status = 'confirmed'
-        AND event_start < ?
-        AND event_end > ?
-        AND (? IS NULL OR id <> ?)
-      LIMIT 1`,
-    [artistId, end, start, excludeBookingId, excludeBookingId],
-  );
-  return rows[0] || null;
+/**
+ * Half-open interval overlap: [aStart, aEnd) overlaps [bStart, bEnd) iff aStart < bEnd AND aEnd > bStart.
+ * Served by idx_bookings_artist_status_start (artist_id, status, event_start).
+ */
+function findConfirmedOverlap({ artistId, start, end, excludeBookingId = null }, t) {
+  return Booking.findOne({
+    where: {
+      artist_id: artistId,
+      status: 'confirmed',
+      event_start: { [Op.lt]: end },
+      event_end: { [Op.gt]: start },
+      ...(excludeBookingId ? { id: { [Op.ne]: excludeBookingId } } : {}),
+    },
+    attributes: ['id'],
+    transaction: t,
+  });
 }
 
-async function getBookingForUpdate(conn, id) {
-  const [rows] = await conn.query(`SELECT ${BOOKING_COLUMNS} FROM bookings WHERE id = ? FOR UPDATE`, [id]);
-  return rows[0] || null;
-}
-
-async function recordHistory(conn, { bookingId, from, to, userId }) {
-  await conn.query(
-    'INSERT INTO booking_status_history (booking_id, from_status, to_status, changed_by) VALUES (?, ?, ?, ?)',
-    [bookingId, from, to, userId],
+function recordHistory({ bookingId, from, to, userId }, t) {
+  return BookingStatusHistory.create(
+    { booking_id: bookingId, from_status: from, to_status: to, changed_by: userId },
+    { transaction: t },
   );
 }
 
@@ -58,35 +57,32 @@ async function createBooking(client, { artist_id: artistId, event_start: start, 
     throw AppError.unprocessable('event_end must be after event_start');
   }
 
-  return withTransaction(async (conn) => {
-    const artistExists = await lockArtist(conn, artistId);
-    if (!artistExists) throw AppError.notFound(`Artist ${artistId} not found`);
+  return withTransaction(async (t) => {
+    if (!(await lockArtist(artistId, t))) throw AppError.notFound(`Artist ${artistId} not found`);
 
-    const clash = await findConfirmedOverlap(conn, { artistId, start, end });
+    const clash = await findConfirmedOverlap({ artistId, start, end }, t);
     if (clash) {
       throw AppError.conflict('Artist already has a confirmed booking that overlaps this time window');
     }
 
-    const [result] = await conn.query(
-      `INSERT INTO bookings (artist_id, client_id, status, event_start, event_end, notes)
-       VALUES (?, ?, 'pending', ?, ?, ?)`,
-      [artistId, client.id, start, end, notes],
+    const booking = await Booking.create(
+      { artist_id: artistId, client_id: client.id, status: 'pending', event_start: start, event_end: end, notes },
+      { transaction: t },
     );
-    await recordHistory(conn, { bookingId: result.insertId, from: null, to: 'pending', userId: client.id });
+    await recordHistory({ bookingId: booking.id, from: null, to: 'pending', userId: client.id }, t);
 
-    const [rows] = await conn.query(`SELECT ${BOOKING_COLUMNS} FROM bookings WHERE id = ?`, [result.insertId]);
-    return rows[0];
+    return booking.toJSON();
   });
 }
 
 async function updateBookingStatus(user, bookingId, toStatus) {
-  return withTransaction(async (conn) => {
+  return withTransaction(async (t) => {
     // Unlocked read only to learn the artist, so locks can be taken in a consistent order.
-    const [peek] = await conn.query('SELECT artist_id FROM bookings WHERE id = ?', [bookingId]);
-    if (!peek.length) throw AppError.notFound(`Booking ${bookingId} not found`);
+    const peek = await Booking.findByPk(bookingId, { attributes: ['artist_id'], transaction: t });
+    if (!peek) throw AppError.notFound(`Booking ${bookingId} not found`);
 
-    await lockArtist(conn, peek[0].artist_id);
-    const booking = await getBookingForUpdate(conn, bookingId);
+    await lockArtist(peek.artist_id, t);
+    const booking = await Booking.findByPk(bookingId, { lock: t.LOCK.UPDATE, transaction: t });
 
     // 1. Ownership — an artist/client may only touch their own bookings.
     const ownerId = user.role === 'artist' ? booking.artist_id : booking.client_id;
@@ -111,28 +107,27 @@ async function updateBookingStatus(user, bookingId, toStatus) {
 
     // 4. Confirming must not create a double booking for the artist.
     if (toStatus === 'confirmed') {
-      const clash = await findConfirmedOverlap(conn, {
-        artistId: booking.artist_id,
-        start: booking.event_start,
-        end: booking.event_end,
-        excludeBookingId: booking.id,
-      });
+      const clash = await findConfirmedOverlap(
+        {
+          artistId: booking.artist_id,
+          start: booking.event_start,
+          end: booking.event_end,
+          excludeBookingId: booking.id,
+        },
+        t,
+      );
       if (clash) {
-        throw AppError.conflict(
-          `Cannot confirm: overlaps with confirmed booking ${clash.id} for this artist`,
-        );
+        throw AppError.conflict(`Cannot confirm: overlaps with confirmed booking ${clash.id} for this artist`);
       }
     }
 
-    await conn.query('UPDATE bookings SET status = ?, cancelled_by = ? WHERE id = ?', [
-      toStatus,
-      toStatus === 'cancelled' ? user.role : booking.cancelled_by,
-      booking.id,
-    ]);
-    await recordHistory(conn, { bookingId: booking.id, from, to: toStatus, userId: user.id });
+    await booking.update(
+      { status: toStatus, cancelled_by: toStatus === 'cancelled' ? user.role : booking.cancelled_by },
+      { transaction: t },
+    );
+    await recordHistory({ bookingId: booking.id, from, to: toStatus, userId: user.id }, t);
 
-    const [rows] = await conn.query(`SELECT ${BOOKING_COLUMNS} FROM bookings WHERE id = ?`, [booking.id]);
-    return rows[0];
+    return booking.toJSON();
   });
 }
 

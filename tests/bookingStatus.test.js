@@ -3,26 +3,15 @@
 const request = require('supertest');
 const bcrypt = require('bcrypt');
 const { createApp } = require('../src/app');
-const { pool } = require('../src/db/mysql');
+const { sequelize, User, Booking, BookingStatusHistory } = require('../src/models/sql');
+const { resetMysql } = require('../scripts/resetMysql');
 
 const app = createApp();
 const PASSWORD = 'integration-test-pw';
 
-async function resetDb() {
-  await pool.query('SET FOREIGN_KEY_CHECKS = 0');
-  for (const t of ['payments', 'booking_status_history', 'bookings', 'users']) {
-    await pool.query(`TRUNCATE TABLE ${t}`);
-  }
-  await pool.query('SET FOREIGN_KEY_CHECKS = 1');
-}
-
 async function createUser(name, email, role) {
-  const hash = await bcrypt.hash(PASSWORD, 4);
-  const [r] = await pool.query(
-    'INSERT INTO users (name, email, password_hash, role) VALUES (?, ?, ?, ?)',
-    [name, email, hash, role],
-  );
-  return r.insertId;
+  const user = await User.create({ name, email, role, password_hash: await bcrypt.hash(PASSWORD, 4) });
+  return user.id;
 }
 
 async function login(email) {
@@ -40,7 +29,7 @@ describe('PATCH /bookings/:id/status — state machine', () => {
   let bookingId;
 
   beforeAll(async () => {
-    await resetDb();
+    await resetMysql();
     artistId = await createUser('Test Artist', 'artist@test.local', 'artist');
     await createUser('Test Client', 'client@test.local', 'client');
     artistToken = await login('artist@test.local');
@@ -58,7 +47,7 @@ describe('PATCH /bookings/:id/status — state machine', () => {
   });
 
   afterAll(async () => {
-    await pool.end();
+    await sequelize.close();
   });
 
   it('returns 422 with a descriptive error for an invalid transition (pending -> completed)', async () => {
@@ -75,8 +64,8 @@ describe('PATCH /bookings/:id/status — state machine', () => {
     });
 
     // The booking must be left untouched.
-    const [rows] = await pool.query('SELECT status FROM bookings WHERE id = ?', [bookingId]);
-    expect(rows[0].status).toBe('pending');
+    const booking = await Booking.findByPk(bookingId);
+    expect(booking.status).toBe('pending');
   });
 
   it('returns 422 when moving out of a terminal status (cancelled -> confirmed)', async () => {
@@ -96,7 +85,7 @@ describe('PATCH /bookings/:id/status — state machine', () => {
     expect(res.body.error).toMatch(/terminal status/);
   });
 
-  it('allows the full happy path for the assigned artist', async () => {
+  it('allows the full happy path for the assigned artist and records history', async () => {
     for (const status of ['confirmed', 'in_progress', 'completed']) {
       const res = await request(app)
         .patch(`/bookings/${bookingId}/status`)
@@ -105,6 +94,13 @@ describe('PATCH /bookings/:id/status — state machine', () => {
       expect(res.status).toBe(200);
       expect(res.body).toMatchObject({ success: true, error: null, data: { status } });
     }
+
+    const history = await BookingStatusHistory.findAll({
+      where: { booking_id: bookingId },
+      order: [['id', 'ASC']],
+      raw: true,
+    });
+    expect(history.map((h) => h.to_status)).toEqual(['pending', 'confirmed', 'in_progress', 'completed']);
   });
 
   it('forbids a client from confirming (clients may only cancel)', async () => {

@@ -4,6 +4,8 @@ const jwt = require('jsonwebtoken');
 const config = require('../config/env');
 const AppError = require('../utils/AppError');
 
+const ROLES = new Set(['artist', 'client']);
+
 /** Verifies the Bearer JWT and sets req.user = { id, role }. Stateless — no sessions or cookies. */
 function authenticate(req, res, next) {
   const header = req.headers.authorization || '';
@@ -12,13 +14,25 @@ function authenticate(req, res, next) {
     return next(AppError.unauthorized('Missing or malformed Authorization header'));
   }
 
+  let payload;
   try {
-    const payload = jwt.verify(token, config.jwt.secret, { algorithms: ['HS256'] });
-    req.user = { id: Number(payload.sub), role: payload.role };
-    return next();
+    payload = jwt.verify(token, config.jwt.secret, {
+      algorithms: ['HS256'], // pinned: blocks alg=none / algorithm-confusion attacks
+      issuer: config.jwt.issuer,
+      audience: config.jwt.audience,
+    });
   } catch (err) {
-    return next(AppError.unauthorized('Invalid or expired token'));
+    const message = err.name === 'TokenExpiredError' ? 'Token has expired' : 'Invalid token';
+    return next(AppError.unauthorized(message));
   }
+
+  const id = Number(payload.sub);
+  if (!Number.isInteger(id) || id <= 0 || !ROLES.has(payload.role)) {
+    return next(AppError.unauthorized('Invalid token'));
+  }
+
+  req.user = { id, role: payload.role };
+  return next();
 }
 
 const requireRole = (...roles) => (req, res, next) => {

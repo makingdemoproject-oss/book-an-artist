@@ -1,7 +1,7 @@
 'use strict';
 
-const { pool } = require('../../db/mysql');
-const Review = require('../../models/Review');
+const { User, Booking } = require('../../models/sql');
+const Review = require('../../models/mongo/Review');
 const AppError = require('../../utils/AppError');
 
 const round2 = (n) => Math.round(n * 100) / 100;
@@ -12,19 +12,15 @@ const round2 = (n) => Math.round(n * 100) / 100;
  * that was later cancelled/disputed never counts. See README "Trade-offs" for the scaling note.
  */
 async function getArtistReviews(artistId, { page, limit }) {
-  const [artistRows] = await pool.query(
-    "SELECT id, name FROM users WHERE id = ? AND role = 'artist'",
-    [artistId],
-  );
-  if (!artistRows.length) throw AppError.notFound(`Artist ${artistId} not found`);
+  // Independent lookups — run them concurrently on separate pool connections.
+  const [artist, completed] = await Promise.all([
+    User.findOne({ where: { id: artistId, role: 'artist' }, attributes: ['id', 'name'], raw: true }),
+    // Covered by idx_bookings_artist_status_start (artist_id, status, …) — index-only scan.
+    Booking.findAll({ where: { artist_id: artistId, status: 'completed' }, attributes: ['id'], raw: true }),
+  ]);
+  if (!artist) throw AppError.notFound(`Artist ${artistId} not found`);
 
-  const [completed] = await pool.query(
-    "SELECT id FROM bookings WHERE artist_id = ? AND status = 'completed'",
-    [artistId],
-  );
-  const completedBookingIds = completed.map((r) => r.id);
-
-  const match = { artistId, bookingId: { $in: completedBookingIds } };
+  const match = { artistId, bookingId: { $in: completed.map((b) => b.id) } };
   const skip = (page - 1) * limit;
 
   // One round trip: summary, distribution and the requested page are computed together.
@@ -61,7 +57,7 @@ async function getArtistReviews(artistId, { page, limit }) {
   for (const { _id: score, count } of result.distribution) distribution[score] = count;
 
   return {
-    artist: { id: artistRows[0].id, name: artistRows[0].name },
+    artist: { id: artist.id, name: artist.name },
     summary: {
       averageScore: summaryRow ? round2(summaryRow.average) : 0,
       totalCount: total,

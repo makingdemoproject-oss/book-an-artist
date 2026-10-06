@@ -1,11 +1,11 @@
 # Book an Artist — Backend API
 
-A REST API for booking artists, built with Node.js and Express.
+A REST API for booking artists, built with Node.js and Express. MySQL is accessed through **Sequelize** models and MongoDB through **Mongoose**.
 
 | Store   | Holds | Why |
 |---------|-------|-----|
-| **MySQL**   | users, bookings, booking status history, payments | Relational and transactional: foreign keys, row locks for double-booking protection, money as `DECIMAL` |
-| **MongoDB** | artist profiles, reviews | Document-shaped and read-heavy; `$facet` computes the review summary and a page of reviews in one round trip |
+| **MySQL** (Sequelize) | users, bookings, booking status history, payments | Relational and transactional: foreign keys, row locks for double-booking protection, money as `DECIMAL` |
+| **MongoDB** (Mongoose) | artist profiles, reviews | Document-shaped and read-heavy; `$facet` computes the review summary and a page of reviews in one round trip |
 
 Authentication uses stateless JWTs (`Authorization: Bearer <token>`) with no sessions or cookies.
 
@@ -137,27 +137,71 @@ Only reviews whose booking is `completed` are included. Reviews are sorted newes
 ```
 src/
   app.js                 Express app factory (imported by tests without opening a port)
-  server.js              Connects both databases, starts HTTP, graceful shutdown
+  server.js              Boot, graceful shutdown, process-level error handlers
   config/env.js          Loads and validates environment variables
-  db/                    mysql2 pool + transaction helper, mongoose connection
-  middleware/            JWT auth + role guard, zod validation, error handler
-  models/                Mongoose models: ArtistProfile, Review
+  db/sequelize.js        Sequelize instance, pool, transaction helper with deadlock retry
+  db/mongo.js            Mongoose connection (sanitizeFilter, pool, ping)
+  middleware/            auth (JWT + roles), security (CORS, rate limits, 415), validation (zod),
+                         requestLogger (pino-http + request ids), errorHandler (global)
+  models/sql/            Sequelize models: User, Booking, BookingStatusHistory, Payment (+ associations)
+  models/mongo/          Mongoose models: ArtistProfile, Review
   modules/
     auth/                routes -> controller -> service (+ validation)
     bookings/            routes -> controller -> service, bookingStateMachine.js
     artists/             routes -> controller -> reviews service
-  utils/                 AppError, response helpers
-db/schema.sql            MySQL schema (idempotent)
+  utils/                 AppError, logger, response helpers
+db/schema.sql            MySQL DDL, the source of truth (CHECK constraints, named indexes)
 db/leaderboard.sql       Task 3A query
-scripts/                 migrate.js, seed.js
+scripts/                 migrate.js, seed.js, resetMysql.js
 tests/                   Supertest integration tests against a real MySQL test database
 ```
 
 Each module follows **routes → controller → service**:
 
 - **Routes** wire up middleware: auth, role checks and validation.
-- **Controllers** translate between HTTP and the service layer and know nothing about SQL.
-- **Services** hold the business rules and all database access.
+- **Controllers** translate between HTTP and the service layer and know nothing about the database.
+- **Services** hold the business rules and use the Sequelize and Mongoose models.
+
+**Why `schema.sql` instead of `sequelize.sync()`:** `sync()` can't express `CHECK` constraints such as `event_end > event_start`, and it's unsafe to run against production data. The DDL is applied by `npm run db:migrate`, and the models map onto those tables.
+
+---
+
+## Production hardening
+
+**Security**
+- `helmet` security headers; `x-powered-by` disabled.
+- CORS allowlist from `CORS_ORIGINS`.
+- Global per-IP rate limit, plus a stricter limit on login.
+- Write requests must be JSON (otherwise `415`); bodies are capped at 100 kB; the simple query parser blocks nested objects.
+- JWT: HS256 pinned (blocks `alg=none` and algorithm confusion); `iss` and `aud` verified; the payload shape is checked.
+- bcrypt for passwords, with a timing-equalised login. `password_hash` is excluded by the Sequelize default scope.
+- Mongoose `sanitizeFilter` and `strictQuery` against NoSQL operator injection. All SQL is parameterised by Sequelize.
+- Logs redact `Authorization` headers, passwords and tokens. 5xx responses never expose internals.
+
+**Global error handling** (`middleware/errorHandler.js`)
+- Every error becomes `{ success: false, data: null, error }`. Known errors map to precise status codes:
+  - Sequelize unique → 409, foreign key → 422, validation → 400
+  - MySQL CHECK → 422; deadlock or lock-wait timeout → 503 with `Retry-After`; connection loss → 503
+  - Mongoose validation or cast → 400, duplicate key → 409
+  - bad JSON → 400, oversized body → 413
+- Unknown errors are logged with their stack and request ID, and returned as a generic 500.
+- Every response carries an `X-Request-Id`. An incoming one is reused, so logs can be correlated across services.
+
+**Performance**
+- Tuned MySQL (Sequelize) and MongoDB connection pools; compression; keep-alive tuning.
+- Composite indexes on every hot path. The review summary comes from one Mongo `$facet` round trip, and its two independent MySQL lookups run in parallel.
+- Deadlocked transactions are retried automatically with jittered backoff, instead of failing the request.
+- Mongo `autoIndex` is off in production; indexes are built by the setup step instead.
+
+**Graceful shutdown and process safety** (`src/server.js`)
+- On `SIGTERM`/`SIGINT`:
+  1. `/ready` switches to 503 and responses send `Connection: close`.
+  2. The server stops accepting connections, in-flight requests finish and idle keep-alive sockets are closed.
+  3. The MySQL and MongoDB pools are closed.
+  4. The process exits. If draining takes longer than `SHUTDOWN_TIMEOUT_MS`, it force-exits instead.
+- `unhandledRejection` and `uncaughtException` are logged as `fatal` and trigger the same graceful shutdown with exit code 1. The process is then in an unknown state, so the supervisor (PM2, Docker or Kubernetes) restarts a clean instance rather than letting it continue with corrupted state.
+- `GET /health` is a liveness probe; `GET /ready` is a readiness probe that pings both databases.
+- Slow-client protection: `requestTimeout` and `headersTimeout`.
 
 ---
 
@@ -168,7 +212,7 @@ Each module follows **routes → controller → service**:
 - **409 vs 422.** A `422` means the request breaks a business rule (bad transition, date in the past). A `409` means it conflicts with the current state of another resource (an overlapping booking).
 - **Validation with zod** returns readable `400` messages, and handlers receive typed, coerced values.
 - **Integration tests use a real MySQL database** (`<db>_test`), not mocks. Transactions, row locks, `ENUM`s and `CHECK` constraints are part of the behaviour under test.
-- **Security:** helmet, a 100 kB JSON body limit, HS256 pinned when verifying tokens, internals never leaked in 500 responses, parameterised SQL everywhere, and secrets only in `.env`, which git ignores.
+- **Secrets** live only in `.env`, which git ignores. See *Production hardening* above for the rest of the security measures.
 
 ## Trade-offs
 
@@ -181,6 +225,6 @@ Each module follows **routes → controller → service**:
 
 - Endpoints to create reviews (client only, once per completed booking) and to list "my bookings".
 - Wire `GET /artists/leaderboard` to a Mongo aggregation, cached in Redis as described in TASK3.
-- Versioned migrations (Knex or Umzug) instead of one idempotent schema file.
-- Structured logging (pino) with request IDs, OpenAPI docs, Docker Compose for MySQL and MongoDB, and CI running `npm test`.
+- Versioned migrations (sequelize-cli / Umzug) instead of one idempotent schema file.
+- OpenAPI docs, Docker Compose for MySQL and MongoDB, CI running `npm test`, and metrics/tracing (OpenTelemetry).
 - More tests: overlap conflicts under concurrency, login, and reviews pagination and summary.
