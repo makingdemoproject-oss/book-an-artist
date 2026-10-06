@@ -75,6 +75,8 @@ process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
 
 async function start() {
+  config.assertServerConfig();
+
   // Fail fast if either database is unreachable.
   await pingMysql();
   await connectMongo();

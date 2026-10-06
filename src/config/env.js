@@ -36,7 +36,8 @@ const config = {
 
   jwt: {
     // Tests get a throwaway secret so `npm test` works without extra setup.
-    secret: required('JWT_SECRET', isTest ? 'test-only-secret-not-for-real-use-0123456789' : undefined),
+    // Validated by assertServerConfig() at server start — scripts like db:migrate don't need it.
+    secret: process.env.JWT_SECRET || (isTest ? 'test-only-secret-not-for-real-use-0123456789' : ''),
     expiresIn: process.env.JWT_EXPIRES_IN || '1h',
     issuer: process.env.JWT_ISSUER || 'book-an-artist',
     audience: process.env.JWT_AUDIENCE || 'book-an-artist-api',
@@ -72,8 +73,13 @@ const config = {
   },
 };
 
-if (!isTest && config.jwt.secret.length < 32) {
-  throw new Error('JWT_SECRET must be at least 32 characters');
+/** Settings only the HTTP server needs. Called from server.js so CLI scripts don't require them. */
+function assertServerConfig() {
+  required('JWT_SECRET', config.jwt.secret);
+  if (config.jwt.secret.length < 32) {
+    throw new Error('JWT_SECRET must be at least 32 characters');
+  }
 }
 
 module.exports = config;
+module.exports.assertServerConfig = assertServerConfig;
