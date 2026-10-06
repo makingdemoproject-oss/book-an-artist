@@ -1,0 +1,484 @@
+{
+  "info": {
+    "name": "Book an Artist API",
+    "description": "All endpoints of the book-an-artist API.\n\nHow to use:\n1. Start the API (`npm start`); it creates the database, tables and seed data automatically.\n2. Set the collection variable `password` to the SEED_PASSWORD from your .env.\n3. Run the requests top to bottom (or use Collection Runner). Login requests save tokens automatically; 'Create booking' saves `bookingId`.\n\nEvery response has the shape { success, data, error }.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:3000" },
+    { "key": "password", "value": "" },
+    { "key": "clientToken", "value": "" },
+    { "key": "artistToken", "value": "" },
+    { "key": "otherArtistToken", "value": "" },
+    { "key": "artistId", "value": "1" },
+    { "key": "bookingId", "value": "" }
+  ],
+  "event": [
+    {
+      "listen": "test",
+      "script": {
+        "type": "text/javascript",
+        "exec": [
+          "pm.test('Response has { success, data, error } shape', function () {",
+          "  const body = pm.response.json();",
+          "  pm.expect(body).to.have.all.keys('success', 'data', 'error');",
+          "});"
+        ]
+      }
+    }
+  ],
+  "item": [
+    {
+      "name": "Health",
+      "item": [
+        {
+          "name": "Liveness — GET /health",
+          "request": { "method": "GET", "url": "{{baseUrl}}/health" }
+        },
+        {
+          "name": "Readiness — GET /ready",
+          "request": { "method": "GET", "url": "{{baseUrl}}/ready" }
+        }
+      ]
+    },
+    {
+      "name": "1. Auth",
+      "item": [
+        {
+          "name": "Login as client (saves clientToken)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set('clientToken', body.data.token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"rohan@client.test\",\n  \"password\": \"{{password}}\"\n}" }
+          }
+        },
+        {
+          "name": "Login as artist (saves artistToken)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "const body = pm.response.json();",
+                  "pm.collectionVariables.set('artistToken', body.data.token);",
+                  "pm.collectionVariables.set('artistId', body.data.user.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"aarav@artist.test\",\n  \"password\": \"{{password}}\"\n}" }
+          }
+        },
+        {
+          "name": "Login as another artist (saves otherArtistToken)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 OK', () => pm.response.to.have.status(200));",
+                  "pm.collectionVariables.set('otherArtistToken', pm.response.json().data.token);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"diya@artist.test\",\n  \"password\": \"{{password}}\"\n}" }
+          }
+        },
+        {
+          "name": "Login — wrong password (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('401 with generic message', () => {",
+                  "  pm.response.to.have.status(401);",
+                  "  pm.expect(pm.response.json().error).to.eql('Invalid email or password');",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/auth/login",
+            "body": { "mode": "raw", "raw": "{\n  \"email\": \"rohan@client.test\",\n  \"password\": \"wrong-password\"\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "2. Bookings",
+      "item": [
+        {
+          "name": "Create booking — client (saves bookingId)",
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "// A random future slot (60-360 days ahead) so repeated runs don't collide.",
+                  "const day = 60 + Math.floor(Math.random() * 300);",
+                  "const start = new Date(Date.now() + day * 864e5); start.setUTCHours(18, 0, 0, 0);",
+                  "const end = new Date(start.getTime() + 3 * 3600e3);",
+                  "pm.variables.set('eventStart', start.toISOString());",
+                  "pm.variables.set('eventEnd', end.toISOString());"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('201 Created, status pending', () => {",
+                  "  pm.response.to.have.status(201);",
+                  "  pm.expect(pm.response.json().data.status).to.eql('pending');",
+                  "});",
+                  "pm.collectionVariables.set('bookingId', pm.response.json().data.id);"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" }
+            ],
+            "url": "{{baseUrl}}/bookings",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"artist_id\": {{artistId}},\n  \"event_start\": \"{{eventStart}}\",\n  \"event_end\": \"{{eventEnd}}\",\n  \"notes\": \"Wedding reception, 3-hour set\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Create booking — event_start in the past (422)",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('422', () => pm.response.to.have.status(422));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" }
+            ],
+            "url": "{{baseUrl}}/bookings",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"artist_id\": {{artistId}},\n  \"event_start\": \"2020-01-01T18:00:00Z\",\n  \"event_end\": \"2020-01-01T21:00:00Z\",\n  \"notes\": \"Past event\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Create booking — as artist (403)",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('403', () => pm.response.to.have.status(403));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{artistToken}}" }
+            ],
+            "url": "{{baseUrl}}/bookings",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"artist_id\": {{artistId}},\n  \"event_start\": \"2030-01-01T18:00:00Z\",\n  \"event_end\": \"2030-01-01T21:00:00Z\",\n  \"notes\": \"Artists cannot book\"\n}"
+            }
+          }
+        },
+        {
+          "name": "Create booking — missing fields (400)",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('400', () => pm.response.to.have.status(400));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" }
+            ],
+            "url": "{{baseUrl}}/bookings",
+            "body": { "mode": "raw", "raw": "{\n  \"artist_id\": {{artistId}}\n}" }
+          }
+        },
+        {
+          "name": "Create booking — no token (401)",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('401', () => pm.response.to.have.status(401));"] }
+            }
+          ],
+          "request": {
+            "method": "POST",
+            "header": [{ "key": "Content-Type", "value": "application/json" }],
+            "url": "{{baseUrl}}/bookings",
+            "body": { "mode": "raw", "raw": "{}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "3. Booking status (state machine)",
+      "item": [
+        {
+          "name": "Invalid: pending → completed (422)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('422 with descriptive error', () => {",
+                  "  pm.response.to.have.status(422);",
+                  "  pm.expect(pm.response.json().error).to.include(\"Invalid status transition from 'pending' to 'completed'\");",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{artistToken}}" }
+            ],
+            "url": "{{baseUrl}}/bookings/{{bookingId}}/status",
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"completed\"\n}" }
+          }
+        },
+        {
+          "name": "Client tries to confirm (403)",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('403', () => pm.response.to.have.status(403));"] }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" }
+            ],
+            "url": "{{baseUrl}}/bookings/{{bookingId}}/status",
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"confirmed\"\n}" }
+          }
+        },
+        {
+          "name": "Another artist tries to confirm (403)",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('403', () => pm.response.to.have.status(403));"] }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{otherArtistToken}}" }
+            ],
+            "url": "{{baseUrl}}/bookings/{{bookingId}}/status",
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"confirmed\"\n}" }
+          }
+        },
+        {
+          "name": "Artist: pending → confirmed (200)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": ["pm.test('200 confirmed', () => { pm.response.to.have.status(200); pm.expect(pm.response.json().data.status).to.eql('confirmed'); });"]
+              }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{artistToken}}" }
+            ],
+            "url": "{{baseUrl}}/bookings/{{bookingId}}/status",
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"confirmed\"\n}" }
+          }
+        },
+        {
+          "name": "Artist: confirmed → in_progress (200)",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200', () => pm.response.to.have.status(200));"] }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{artistToken}}" }
+            ],
+            "url": "{{baseUrl}}/bookings/{{bookingId}}/status",
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"in_progress\"\n}" }
+          }
+        },
+        {
+          "name": "Client tries to cancel in_progress (422)",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('422', () => pm.response.to.have.status(422));"] }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{clientToken}}" }
+            ],
+            "url": "{{baseUrl}}/bookings/{{bookingId}}/status",
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"cancelled\"\n}" }
+          }
+        },
+        {
+          "name": "Artist: in_progress → completed (200)",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('200', () => pm.response.to.have.status(200));"] }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{artistToken}}" }
+            ],
+            "url": "{{baseUrl}}/bookings/{{bookingId}}/status",
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"completed\"\n}" }
+          }
+        },
+        {
+          "name": "Terminal: completed → confirmed (422)",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('422', () => pm.response.to.have.status(422));"] }
+            }
+          ],
+          "request": {
+            "method": "PATCH",
+            "header": [
+              { "key": "Content-Type", "value": "application/json" },
+              { "key": "Authorization", "value": "Bearer {{artistToken}}" }
+            ],
+            "url": "{{baseUrl}}/bookings/{{bookingId}}/status",
+            "body": { "mode": "raw", "raw": "{\n  \"status\": \"confirmed\"\n}" }
+          }
+        }
+      ]
+    },
+    {
+      "name": "4. Artist reviews",
+      "item": [
+        {
+          "name": "Get artist reviews (page 1, limit 5)",
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test('200 with summary + pagination', () => {",
+                  "  pm.response.to.have.status(200);",
+                  "  const d = pm.response.json().data;",
+                  "  pm.expect(d.summary).to.have.all.keys('averageScore', 'totalCount', 'distribution');",
+                  "  pm.expect(d.pagination.limit).to.eql(5);",
+                  "});"
+                ]
+              }
+            }
+          ],
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/artists/{{artistId}}/reviews?page=1&limit=5",
+              "host": ["{{baseUrl}}"],
+              "path": ["artists", "{{artistId}}", "reviews"],
+              "query": [
+                { "key": "page", "value": "1" },
+                { "key": "limit", "value": "5" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Get artist reviews (page 2, limit 5)",
+          "request": {
+            "method": "GET",
+            "url": {
+              "raw": "{{baseUrl}}/artists/{{artistId}}/reviews?page=2&limit=5",
+              "host": ["{{baseUrl}}"],
+              "path": ["artists", "{{artistId}}", "reviews"],
+              "query": [
+                { "key": "page", "value": "2" },
+                { "key": "limit", "value": "5" }
+              ]
+            }
+          }
+        },
+        {
+          "name": "Unknown artist (404)",
+          "event": [
+            {
+              "listen": "test",
+              "script": { "type": "text/javascript", "exec": ["pm.test('404', () => pm.response.to.have.status(404));"] }
+            }
+          ],
+          "request": { "method": "GET", "url": "{{baseUrl}}/artists/999999/reviews" }
+        }
+      ]
+    }
+  ]
+}

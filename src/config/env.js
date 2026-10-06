@@ -32,7 +32,8 @@ const config = {
   isTest,
   isProduction,
   port: int('PORT', 3000),
-  logLevel: process.env.LOG_LEVEL || (isTest ? 'silent' : 'info'),
+  // Tests are silent unless TEST_LOG_LEVEL is set, so .env's LOG_LEVEL doesn't flood jest output.
+  logLevel: isTest ? process.env.TEST_LOG_LEVEL || 'silent' : process.env.LOG_LEVEL || 'info',
 
   jwt: {
     // Tests get a throwaway secret so `npm test` works without extra setup.

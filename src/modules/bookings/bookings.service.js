@@ -71,6 +71,8 @@ async function createBooking(client, { artist_id: artistId, event_start: start, 
     );
     await recordHistory({ bookingId: booking.id, from: null, to: 'pending', userId: client.id }, t);
 
+    // Reload so the response has every column (DB defaults included), same shape as PATCH.
+    await booking.reload({ transaction: t });
     return booking.toJSON();
   });
 }

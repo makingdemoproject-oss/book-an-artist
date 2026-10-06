@@ -83,7 +83,7 @@ async function start() {
 
   const app = createApp({ isShuttingDown: () => shuttingDown });
   server = app.listen(config.port, () => {
-    logger.info({ port: config.port, env: config.env }, 'book-an-artist API listening');
+    logger.info({ port: config.port }, 'book-an-artist API listening');
   });
 
   // Slow-client protection and keep-alive tuning (keepAlive must exceed the LB's idle timeout).

@@ -8,11 +8,13 @@
     "node": ">=18"
   },
   "scripts": {
+    "prestart": "npm run db:bootstrap",
     "start": "node src/server.js",
-    "dev": "node --watch src/server.js",
+    "dev": "npm run db:bootstrap && node --watch src/server.js",
     "db:migrate": "node scripts/migrate.js",
     "db:seed": "node scripts/seed.js",
-    "setup": "npm run db:migrate && npm run db:seed",
+    "db:bootstrap": "node scripts/seed.js --if-empty",
+    "setup": "npm run db:seed",
     "test": "jest --runInBand"
   },
   "jest": {

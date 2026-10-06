@@ -1,9 +1,14 @@
 'use strict';
 
 /**
- * Resets and seeds local demo data in MySQL (via Sequelize models) and MongoDB.
- * Every seeded account uses the password from SEED_PASSWORD (see .env.example).
+ * Creates the MySQL database + tables (via migrate) and seeds demo data in MySQL and MongoDB.
+ *
+ *   node scripts/seed.js              → always resets and re-seeds   (npm run db:seed)
+ *   node scripts/seed.js --if-empty   → seeds only a fresh database  (runs before npm start)
+ *
+ * Every seeded account uses SEED_PASSWORD; if it is not set, a random one is generated and printed.
  */
+const crypto = require('crypto');
 const bcrypt = require('bcrypt');
 const config = require('../src/config/env');
 const { sequelize, User, Booking, Payment } = require('../src/models/sql');
@@ -50,11 +55,18 @@ const COMMENTS = {
   5: 'Absolutely outstanding!',
 };
 
-async function seed() {
-  const password = process.env.SEED_PASSWORD;
-  if (!password) throw new Error('Set SEED_PASSWORD in .env before seeding');
-
+async function seed({ ifEmpty }) {
   await migrate();
+  console.log(`MySQL database '${config.mysql.database}' and tables are ready.`);
+
+  if (ifEmpty && (await User.count()) > 0) {
+    console.log('Demo data already present, skipping seed (run "npm run db:seed" to reset it).');
+    return;
+  }
+
+  const password = process.env.SEED_PASSWORD || crypto.randomBytes(9).toString('base64url');
+  const generatedPassword = !process.env.SEED_PASSWORD;
+
   await connectMongo();
   const passwordHash = await bcrypt.hash(password, config.bcryptRounds);
 
@@ -134,10 +146,10 @@ async function seed() {
   console.log('Seed complete.');
   console.log('  Artists :', artists.map((a) => `${a.email} (id ${a.id})`).join(', '));
   console.log('  Clients :', clients.map((c) => `${c.email} (id ${c.id})`).join(', '));
-  console.log('  Password: value of SEED_PASSWORD in your .env');
+  console.log(`  Password: ${generatedPassword ? `${password}  (generated, set SEED_PASSWORD in .env to choose one)` : 'value of SEED_PASSWORD in your .env'}`);
 }
 
-seed()
+seed({ ifEmpty: process.argv.includes('--if-empty') })
   .catch((err) => {
     console.error('Seed failed:', err.message);
     process.exitCode = 1;

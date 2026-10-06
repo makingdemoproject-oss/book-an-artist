@@ -15,25 +15,103 @@ Other submission documents: [TASK3.md](TASK3.md) covers the SQL leaderboard and 
 
 ## Running locally
 
-**Prerequisites:** Node.js 18 or later, MySQL 8, and MongoDB 6 or later. Both databases can run locally. `MONGO_URI` can also point to an Atlas cluster.
+### Prerequisites
+
+| Tool | Version | Check |
+|------|---------|-------|
+| Node.js | 18 or later | `node -v` |
+| MySQL | 8.x, running on port 3306 | `mysql -u root -p` |
+| MongoDB | 6 or later, running on port 27017 (or an Atlas URI) | `mongosh` |
+
+You don't need to create a database by hand. The app creates the MySQL database and all tables itself.
+
+### Step 1: Clone and install
 
 ```bash
 git clone https://github.com/makingdemoproject-oss/book-an-artist.git
 cd book-an-artist
 npm install
-
-cp .env.example .env      # then set MYSQL_PASSWORD, JWT_SECRET, MONGO_URI, SEED_PASSWORD
-npm run setup             # creates the MySQL database and tables, then seeds MySQL and MongoDB
-npm start                 # http://localhost:3000
-
-npm test                  # integration tests (uses a separate <db>_test MySQL database)
 ```
 
-To generate a JWT secret:
+### Step 2: Create `.env`
 
 ```bash
-node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+cp .env.example .env          # Windows CMD: copy .env.example .env
 ```
+
+Fill in these values. Every other key already has a working default.
+
+| Key | What to put |
+|-----|-------------|
+| `MYSQL_PASSWORD` | Your MySQL password for `MYSQL_USER` (default `root`) |
+| `MONGO_URI` | `mongodb://127.0.0.1:27017` for a local MongoDB, or your Atlas `mongodb+srv://…` URI |
+| `JWT_SECRET` | A random string of at least 32 characters. Generate one with `node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"` |
+| `SEED_PASSWORD` | The password for all demo accounts, for example `Demo@12345`. If left empty, a random one is generated and printed. |
+
+### Step 3: Start
+
+```bash
+npm start
+```
+
+`npm start` runs a **bootstrap step first** (`prestart` → `npm run db:bootstrap`):
+
+1. Creates the MySQL database `book_an_artist` if it doesn't exist.
+2. Creates all tables from `db/schema.sql`. This is idempotent, so it's safe on every start.
+3. Seeds demo data into MySQL and MongoDB **only when the database is empty**. Restarting never wipes your data.
+4. Starts the API on **http://localhost:3000**.
+
+Expected output:
+
+```
+MySQL database 'book_an_artist' and tables are ready.
+Seed complete.
+  Artists : aarav@artist.test (id 1), diya@artist.test (id 2), ...
+  Clients : rohan@client.test (id 5), ...
+{"level":30,...,"port":3000,"msg":"book-an-artist API listening"}
+```
+
+Check it's up: `curl http://localhost:3000/ready` returns `{"success":true,"data":{"status":"ready"},"error":null}`.
+
+### Step 4: Run the tests
+
+```bash
+npm test
+```
+
+The tests need **MySQL only**. They create and use a separate database, `book_an_artist_test`, so your dev data is never touched.
+
+### Step 5: Try the API with Postman
+
+Import [`postman/book-an-artist.postman_collection.json`](postman/book-an-artist.postman_collection.json) into Postman, set the collection variable `password` to your `SEED_PASSWORD`, and run the requests top to bottom.
+
+- Login requests save the tokens automatically.
+- **Create booking** saves `bookingId`.
+- The status requests walk through the whole state machine, including the 422 and 403 cases.
+
+Every request has test assertions, so the Collection Runner (or `npx newman run postman/book-an-artist.postman_collection.json`) shows pass or fail for each one.
+
+### All npm scripts
+
+| Command | What it does |
+|---------|--------------|
+| `npm start` | Bootstrap the database (migrate, then seed if empty) and start the server |
+| `npm run dev` | Same, with auto-restart on file changes |
+| `npm test` | Integration tests (Jest + Supertest) against `book_an_artist_test` |
+| `npm run db:migrate` | Create the database and tables only |
+| `npm run db:seed` | **Reset** all data and re-seed demo data |
+| `npm run db:bootstrap` | Migrate, then seed only if empty (runs automatically before `npm start`) |
+
+### Troubleshooting
+
+| Error | Fix |
+|-------|-----|
+| `Access denied for user 'root'@'localhost'` | `MYSQL_PASSWORD` in `.env` is wrong. Check it with `mysql -u root -p`. |
+| `connect ECONNREFUSED 127.0.0.1:3306` | MySQL isn't running. On Windows, run `net start MySQL84` in an Administrator terminal. |
+| `connect ECONNREFUSED 127.0.0.1:27017` | MongoDB isn't running, or isn't installed. |
+| `querySrv ENOTFOUND …mongodb.net` | The Atlas cluster host is wrong or the cluster was deleted. Copy the URI again from Atlas. |
+| `Missing required environment variable: JWT_SECRET` | Set `JWT_SECRET` in `.env`. |
+| `EADDRINUSE :3000` | Port 3000 is taken. Set `PORT=3001` in `.env`. |
 
 ### Seeded accounts
 
@@ -152,8 +230,9 @@ src/
   utils/                 AppError, logger, response helpers
 db/schema.sql            MySQL DDL, the source of truth (CHECK constraints, named indexes)
 db/leaderboard.sql       Task 3A query
-scripts/                 migrate.js, seed.js, resetMysql.js
+scripts/                 migrate.js, seed.js (--if-empty for bootstrap), resetMysql.js
 tests/                   Supertest integration tests against a real MySQL test database
+postman/                 Postman collection covering every endpoint, with test assertions
 ```
 
 Each module follows **routes → controller → service**:
